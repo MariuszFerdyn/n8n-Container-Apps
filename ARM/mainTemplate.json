@@ -1,0 +1,347 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "environmentName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the Container Apps Environment"
+            }
+        },
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Location for all resources"
+            }
+        },
+        "postgresPassword": {
+            "type": "securestring",
+            "metadata": {
+                "description": "PostgreSQL password"
+            }
+        },
+        "postgresUser": {
+            "type": "string",
+            "defaultValue": "postgres",
+            "metadata": {
+                "description": "PostgreSQL user"
+            }
+        },
+        "postgresDatabase": {
+            "type": "string",
+            "defaultValue": "postgres",
+            "metadata": {
+                "description": "PostgreSQL database name"
+            }
+        },
+        "postgresSchema": {
+            "type": "string",
+            "defaultValue": "public",
+            "metadata": {
+                "description": "PostgreSQL schema"
+            }
+        },
+        "timezone": {
+            "type": "string",
+            "defaultValue": "Europe/Warsaw",
+            "metadata": {
+                "description": "Timezone for n8n"
+            }
+        },
+        "storageAccountName": {
+            "type": "string",
+            "defaultValue": "[format('store{0}', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "Storage account name"
+            }
+        }
+    },
+    "variables": {
+        "dbAppName": "[concat(parameters('environmentName'), '-db')]",
+        "n8nAppName": "[concat(parameters('environmentName'), '-n8n')]",
+        "applicationShareName": "application",
+        "dbShareName": "database"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2023-01-01",
+            "name": "[parameters('storageAccountName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "Standard_LRS"
+            },
+            "kind": "StorageV2",
+            "properties": {
+                "supportsHttpsTrafficOnly": true,
+                "minimumTlsVersion": "TLS1_2"
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+            "apiVersion": "2023-01-01",
+            "name": "[format('{0}/default/{1}', parameters('storageAccountName'), variables('applicationShareName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+            "apiVersion": "2023-01-01",
+            "name": "[format('{0}/default/{1}', parameters('storageAccountName'), variables('dbShareName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.App/managedEnvironments",
+            "apiVersion": "2023-05-01",
+            "name": "[parameters('environmentName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "Consumption"
+            },
+            "properties": {
+                "zoneRedundant": false
+            }
+        },
+        {
+            "type": "Microsoft.App/managedEnvironments/storages",
+            "apiVersion": "2023-05-01",
+            "name": "[format('{0}/{1}', parameters('environmentName'), variables('applicationShareName'))]",
+            "properties": {
+                "azureFile": {
+                    "accountName": "[parameters('storageAccountName')]",
+                    "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value]",
+                    "shareName": "[variables('applicationShareName')]",
+                    "accessMode": "ReadWrite"
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', parameters('storageAccountName'), 'default', variables('applicationShareName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.App/managedEnvironments/storages",
+            "apiVersion": "2023-05-01",
+            "name": "[format('{0}/{1}', parameters('environmentName'), variables('dbShareName'))]",
+            "properties": {
+                "azureFile": {
+                    "accountName": "[parameters('storageAccountName')]",
+                    "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value]",
+                    "shareName": "[variables('dbShareName')]",
+                    "accessMode": "ReadWrite"
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', parameters('storageAccountName'), 'default', variables('dbShareName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.App/containerApps",
+            "apiVersion": "2023-05-01",
+            "name": "[variables('dbAppName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+                "[resourceId('Microsoft.App/managedEnvironments/storages', parameters('environmentName'), variables('dbShareName'))]"
+            ],
+            "properties": {
+                "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+                "configuration": {
+                    "activeRevisionsMode": "Single",
+                    "secrets": [
+                        {
+                            "name": "postgres-password",
+                            "value": "[parameters('postgresPassword')]"
+                        }
+                    ],
+                    "ingress": {
+                        "external": false,
+                        "targetPort": 5432,
+                        "exposedPort": 5432,
+                        "transport": "Tcp",
+                        "traffic": [
+                            {
+                                "weight": 100,
+                                "latestRevision": true
+                            }
+                        ]
+                    }
+                },
+                "template": {
+                    "containers": [
+                        {
+                            "name": "postgres",
+                            "image": "docker.io/bitnami/postgresql:latest",
+                            "env": [
+                                {
+                                    "name": "POSTGRESQL_PASSWORD",
+                                    "secretRef": "postgres-password"
+                                },
+                                {
+                                    "name": "POSTGRESQL_USERNAME",
+                                    "value": "[parameters('postgresUser')]"
+                                },
+                                {
+                                    "name": "POSTGRESQL_DATABASE",
+                                    "value": "[parameters('postgresDatabase')]"
+                                }
+                            ],
+                            "resources": {
+                                "cpu": "0.5",
+                                "memory": "1Gi"
+                            },
+                            "volumeMounts": [
+                                {
+                                    "mountPath": "/bitnami",
+                                    "volumeName": "database-volume"
+                                }
+                            ]
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "database-volume",
+                            "storageName": "[variables('dbShareName')]",
+                            "storageType": "AzureFile"
+                        }
+                    ],
+                    "scale": {
+                        "minReplicas": 1,
+                        "maxReplicas": 1
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.App/containerApps",
+            "apiVersion": "2023-05-01",
+            "name": "[variables('n8nAppName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.App/containerApps', variables('dbAppName'))]",
+                "[resourceId('Microsoft.App/managedEnvironments/storages', parameters('environmentName'), variables('applicationShareName'))]"
+            ],
+            "properties": {
+                "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+                "configuration": {
+                    "activeRevisionsMode": "Single",
+                    "secrets": [
+                        {
+                            "name": "db-postgresdb-password",
+                            "value": "[parameters('postgresPassword')]"
+                        }
+                    ],
+                    "ingress": {
+                        "external": true,
+                        "targetPort": 5678,
+                        "transport": "auto"
+                    }
+                },
+                "template": {
+                    "containers": [
+                        {
+                            "name": "n8n",
+                            "image": "docker.n8n.io/n8nio/n8n",
+                            "env": [
+                                {
+                                    "name": "GENERIC_TIMEZONE",
+                                    "value": "[parameters('timezone')]"
+                                },
+                                {
+                                    "name": "TZ",
+                                    "value": "[parameters('timezone')]"
+                                },
+                                {
+                                    "name": "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS",
+                                    "value": "false"
+                                },
+                                {
+                                    "name": "N8N_RUNNERS_ENABLED",
+                                    "value": "true"
+                                },
+                                {
+                                    "name": "N8N_SECURE_COOKIE",
+                                    "value": "false"
+                                },
+                                {
+                                    "name": "DB_TYPE",
+                                    "value": "postgresdb"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_DATABASE",
+                                    "value": "[parameters('postgresDatabase')]"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_HOST",
+                                    "value": "[variables('dbAppName')]"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_PORT",
+                                    "value": "5432"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_USER",
+                                    "value": "[parameters('postgresUser')]"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_SCHEMA",
+                                    "value": "[parameters('postgresSchema')]"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_PASSWORD",
+                                    "secretRef": "db-postgresdb-password"
+                                },
+                                {
+                                    "name": "DB_POSTGRESDB_CONNECTION_TIMEOUT",
+                                    "value": "60000"
+                                }
+                            ],
+                            "resources": {
+                                "cpu": "1",
+                                "memory": "2Gi"
+                            },
+                            "volumeMounts": [
+                                {
+                                    "mountPath": "/home/node/.n8n",
+                                    "volumeName": "application-volume"
+                                }
+                            ]
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "application-volume",
+                            "storageName": "[variables('applicationShareName')]",
+                            "storageType": "AzureFile"
+                        }
+                    ],
+                    "scale": {
+                        "minReplicas": 1,
+                        "maxReplicas": 1
+                    }
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "n8nUrl": {
+            "type": "string",
+            "value": "[concat('https://', variables('n8nAppName'), '.', reference(resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))).defaultDomain)]"
+        },
+        "n8nAppName": {
+            "type": "string",
+            "value": "[variables('n8nAppName')]"
+        },
+        "dbAppName": {
+            "type": "string",
+            "value": "[variables('dbAppName')]"
+        }
+    }
+}
